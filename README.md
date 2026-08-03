@@ -58,7 +58,6 @@ DeepSeek, GLM, Kimi, and more).
   per-browser, doesn't follow you to another device). Needs a Supabase project
   and a decision on auth strategy (anonymous per-device vs. real login) before
   it can be built.
-- Message actions: copy, regenerate, edit
 - Auth, if this stops being just-for-us
 
 ## Session log
@@ -76,3 +75,10 @@ DeepSeek, GLM, Kimi, and more).
   their answers side by side, each tagged with its model. `ChatMessage` now
   carries a `turnId` so `MessageList` can group same-turn answers together.
   Toggle off with the ✕ next to the second dropdown.
+- **Session 4** — message actions. Hover an assistant reply for copy and
+  regenerate (regenerate re-runs just that model, using the history up to
+  its triggering message — in compare mode it only redoes that one column).
+  Hover a user message for edit; saving truncates everything after it and
+  resends, effectively rewinding the conversation from that point.
+  `hooks/useChat.ts` refactored so `updateMessage`/`streamOne` are shared
+  between `sendMessage` and the new `regenerateMessage`/`editMessage`.

@@ -127,6 +127,88 @@ export function useChat() {
     [activeId]
   );
 
+  const updateMessage = useCallback(
+    (conversationId: string, id: string, updater: (msg: ChatMessage) => ChatMessage) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id !== conversationId
+            ? c
+            : { ...c, messages: c.messages.map((m) => (m.id === id ? updater(m) : m)) }
+        )
+      );
+    },
+    []
+  );
+
+  const streamOne = useCallback(
+    async (
+      conversationId: string,
+      model: string,
+      history: ChatMessage[],
+      assistantId: string
+    ) => {
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model,
+            messages: history.map((m) => ({ role: m.role, content: m.content })),
+          }),
+        });
+
+        if (!res.ok || !res.body) {
+          const data = await res.json().catch(() => ({ error: "Request failed" }));
+          throw new Error(data.error || `Request failed with status ${res.status}`);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data:")) continue;
+            const payload = trimmed.slice(5).trim();
+            if (payload === "[DONE]") continue;
+
+            try {
+              const parsed = JSON.parse(payload);
+              const delta: string | undefined = parsed?.choices?.[0]?.delta?.content;
+              if (delta) {
+                updateMessage(conversationId, assistantId, (m) => ({
+                  ...m,
+                  content: m.content + delta,
+                }));
+              }
+            } catch {
+              // Ignore malformed SSE fragments; streaming continues.
+            }
+          }
+        }
+
+        updateMessage(conversationId, assistantId, (m) => ({ ...m, pending: false }));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Something went wrong";
+        setSendError(message);
+        updateMessage(conversationId, assistantId, (m) => ({
+          ...m,
+          pending: false,
+          content: m.content || `Error: ${message}`,
+        }));
+      }
+    },
+    [updateMessage]
+  );
+
   const sendMessage = useCallback(
     async (content: string) => {
       if (!activeId || !content.trim() || sending) return;
@@ -172,81 +254,60 @@ export function useChat() {
 
       setSending(true);
 
-      const updateMessage = (id: string, updater: (msg: ChatMessage) => ChatMessage) => {
-        setConversations((prev) =>
-          prev.map((c) =>
-            c.id !== conversationId
-              ? c
-              : { ...c, messages: c.messages.map((m) => (m.id === id ? updater(m) : m)) }
-          )
-        );
-      };
-
-      const streamOne = async (model: string, assistantId: string) => {
-        try {
-          const res = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model,
-              messages: historyForRequest.map((m) => ({ role: m.role, content: m.content })),
-            }),
-          });
-
-          if (!res.ok || !res.body) {
-            const data = await res.json().catch(() => ({ error: "Request failed" }));
-            throw new Error(data.error || `Request failed with status ${res.status}`);
-          }
-
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed.startsWith("data:")) continue;
-              const payload = trimmed.slice(5).trim();
-              if (payload === "[DONE]") continue;
-
-              try {
-                const parsed = JSON.parse(payload);
-                const delta: string | undefined = parsed?.choices?.[0]?.delta?.content;
-                if (delta) {
-                  updateMessage(assistantId, (m) => ({ ...m, content: m.content + delta }));
-                }
-              } catch {
-                // Ignore malformed SSE fragments; streaming continues.
-              }
-            }
-          }
-
-          updateMessage(assistantId, (m) => ({ ...m, pending: false }));
-        } catch (err) {
-          const message = err instanceof Error ? err.message : "Something went wrong";
-          setSendError(message);
-          updateMessage(assistantId, (m) => ({
-            ...m,
-            pending: false,
-            content: m.content || `Error: ${message}`,
-          }));
-        }
-      };
-
-      const tasks = [streamOne(modelA, assistantAId)];
-      if (modelB && assistantBId) tasks.push(streamOne(modelB, assistantBId));
+      const tasks = [streamOne(conversationId, modelA, historyForRequest, assistantAId)];
+      if (modelB && assistantBId) {
+        tasks.push(streamOne(conversationId, modelB, historyForRequest, assistantBId));
+      }
 
       await Promise.all(tasks);
       setSending(false);
     },
-    [activeId, conversations, sending]
+    [activeId, conversations, sending, streamOne]
+  );
+
+  const regenerateMessage = useCallback(
+    async (assistantId: string) => {
+      if (!activeId || sending) return;
+      const conversation = conversations.find((c) => c.id === activeId);
+      if (!conversation) return;
+
+      const idx = conversation.messages.findIndex((m) => m.id === assistantId);
+      if (idx === -1) return;
+
+      let userIdx = idx - 1;
+      while (userIdx >= 0 && conversation.messages[userIdx].role !== "user") userIdx--;
+      if (userIdx < 0) return;
+
+      const conversationId = activeId;
+      const history = conversation.messages.slice(0, userIdx + 1);
+      const model = conversation.messages[idx].model || conversation.model;
+
+      setSendError(null);
+      updateMessage(conversationId, assistantId, (m) => ({ ...m, content: "", pending: true }));
+      setSending(true);
+      await streamOne(conversationId, model, history, assistantId);
+      setSending(false);
+    },
+    [activeId, conversations, sending, streamOne, updateMessage]
+  );
+
+  const editMessage = useCallback(
+    (userMessageId: string, newContent: string) => {
+      if (!activeId || sending || !newContent.trim()) return;
+      const conversationId = activeId;
+
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== conversationId) return c;
+          const idx = c.messages.findIndex((m) => m.id === userMessageId);
+          if (idx === -1) return c;
+          return { ...c, messages: c.messages.slice(0, idx) };
+        })
+      );
+
+      sendMessage(newContent);
+    },
+    [activeId, sending, sendMessage]
   );
 
   return {
@@ -260,6 +321,8 @@ export function useChat() {
     setActiveModel,
     setCompareModel,
     sendMessage,
+    regenerateMessage,
+    editMessage,
     sending,
     sendError,
   };
