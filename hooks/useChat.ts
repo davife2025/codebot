@@ -3,6 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatMessage, Conversation, ModelOption } from "@/lib/types";
 import { loadActiveId, loadConversations, saveActiveId, saveConversations } from "@/lib/storage";
+import {
+  deleteRemoteConversation,
+  ensureAnonymousSession,
+  fetchRemoteConversations,
+  upsertRemoteConversation,
+} from "@/lib/cloudSync";
+import { isCloudSyncEnabled } from "@/lib/supabaseClient";
 
 const FALLBACK_MODEL = "claude-sonnet-5";
 
@@ -37,42 +44,86 @@ export function useChat() {
   });
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [cloudError, setCloudError] = useState<string | null>(null);
   const initialized = useRef(false);
-  const hasRestored = useRef(conversations.length > 0);
+  const syncTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  // Load the live model list once. If nothing was restored from storage,
-  // seed a first conversation once we know which models are available.
+  // Load the live model list once, then — if cloud sync is configured — sign
+  // in anonymously and merge remote conversations with whatever was restored
+  // from localStorage. Falls back to local-only if Supabase isn't set up or
+  // the anonymous session can't be established.
   useEffect(() => {
     if (initialized.current) return;
     initialized.current = true;
 
-    fetch("/api/models")
-      .then((res) => res.json())
-      .then((data: { models?: ModelOption[]; error?: string }) => {
-        if (data.error) {
-          setModelsError(data.error);
-        }
-        const list = data.models && data.models.length > 0 ? data.models : [];
-        setModels(list);
+    // Snapshot the state this effect was mounted with — this closure only
+    // ever runs once, so these are exactly the values from the initial
+    // (possibly localStorage-restored) render.
+    const localSnapshot = conversations;
+    const activeIdSnapshot = activeId;
 
-        if (!hasRestored.current) {
-          const defaultModel = list[0]?.id || FALLBACK_MODEL;
-          const first = makeConversation(defaultModel);
-          setConversations([first]);
-          setActiveId(first.id);
-        }
-      })
-      .catch((err) => {
+    (async () => {
+      let modelList: ModelOption[] = [];
+      try {
+        const res = await fetch("/api/models");
+        const data: { models?: ModelOption[]; error?: string } = await res.json();
+        if (data.error) setModelsError(data.error);
+        modelList = data.models && data.models.length > 0 ? data.models : [];
+        setModels(modelList);
+      } catch (err) {
         setModelsError(err instanceof Error ? err.message : "Failed to load models");
-        if (!hasRestored.current) {
-          const first = makeConversation(FALLBACK_MODEL);
-          setConversations([first]);
-          setActiveId(first.id);
-        }
+      }
+
+      const seedDefault = () => {
+        const defaultModel = modelList[0]?.id || FALLBACK_MODEL;
+        const first = makeConversation(defaultModel);
+        setConversations([first]);
+        setActiveId(first.id);
+      };
+
+      if (!isCloudSyncEnabled()) {
+        if (localSnapshot.length === 0) seedDefault();
+        return;
+      }
+
+      const uid = await ensureAnonymousSession();
+      if (!uid) {
+        setCloudError(
+          "Couldn't start a Supabase session — check NEXT_PUBLIC_SUPABASE_* env vars and that anonymous sign-ins are enabled. Continuing with local-only storage."
+        );
+        if (localSnapshot.length === 0) seedDefault();
+        return;
+      }
+
+      setUserId(uid);
+      const remote = await fetchRemoteConversations(uid);
+      const remoteIds = new Set(remote.map((c) => c.id));
+      const localOnly = localSnapshot.filter((c) => !remoteIds.has(c.id));
+      localOnly.forEach((c) => {
+        upsertRemoteConversation(uid, c);
       });
+
+      const merged = [...remote, ...localOnly].sort((a, b) => b.createdAt - a.createdAt);
+
+      if (merged.length === 0) {
+        seedDefault();
+        return;
+      }
+
+      setConversations(merged);
+      if (!activeIdSnapshot || !merged.some((c) => c.id === activeIdSnapshot)) {
+        setActiveId(merged[0].id);
+      }
+    })();
+    // Intentionally mount-only: this reads `conversations`/`activeId` as a
+    // one-time snapshot to merge with remote data, then never runs again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Persist to localStorage whenever conversations or the active chat change.
+  // Persist to localStorage whenever conversations or the active chat change
+  // — this stays on even with cloud sync enabled, as a fast local cache and
+  // an offline fallback.
   useEffect(() => {
     saveConversations(conversations);
   }, [conversations]);
@@ -80,6 +131,26 @@ export function useChat() {
   useEffect(() => {
     saveActiveId(activeId);
   }, [activeId]);
+
+  // Push changes to Supabase, debounced per-conversation so a streaming
+  // response doesn't fire a write on every token — only once things settle.
+  useEffect(() => {
+    if (!userId) return;
+    conversations.forEach((c) => {
+      if (syncTimers.current[c.id]) clearTimeout(syncTimers.current[c.id]);
+      syncTimers.current[c.id] = setTimeout(() => {
+        upsertRemoteConversation(userId, c);
+      }, 1000);
+    });
+  }, [conversations, userId]);
+
+  // Clear any pending debounced syncs on unmount.
+  useEffect(() => {
+    const timers = syncTimers.current;
+    return () => {
+      Object.values(timers).forEach(clearTimeout);
+    };
+  }, []);
 
   const activeConversation = conversations.find((c) => c.id === activeId) || null;
 
@@ -103,8 +174,9 @@ export function useChat() {
         }
         return next;
       });
+      if (userId) deleteRemoteConversation(userId, id);
     },
-    [activeId]
+    [activeId, userId]
   );
 
   const setActiveModel = useCallback(
@@ -325,5 +397,7 @@ export function useChat() {
     editMessage,
     sending,
     sendError,
+    cloudSynced: Boolean(userId),
+    cloudError,
   };
 }

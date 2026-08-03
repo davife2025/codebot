@@ -52,13 +52,37 @@ DeepSeek, GLM, Kimi, and more).
    settings (Settings → Environment Variables). No other config needed —
    it's a single Next.js app, one deployment.
 
+## Cross-device sync (optional)
+
+By default, chat history lives in `localStorage` — fast, but tied to one browser.
+To sync across devices:
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. In the SQL Editor, run `supabase/migrations/0001_conversations.sql`.
+3. In **Authentication → Sign In / Providers**, enable **Anonymous Sign-Ins**.
+   This is what lets the app give each browser a stable identity without a
+   login screen — no accounts, no passwords, just a persistent session per
+   device/browser that the same person can also link to a real login later
+   if that's ever needed.
+4. Add these to `.env.local` (find them under Project Settings → API):
+
+   ```bash
+   NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+   NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key_here
+   ```
+
+5. Restart the dev server. On first load, any conversations already sitting
+   in localStorage get pushed up automatically; from then on every chat
+   syncs (debounced ~1s after each change) and a "Synced" indicator shows
+   in the header.
+
+Leave the two env vars unset and none of this activates — the app behaves
+exactly as it did before this section existed.
+
 ## Roadmap (later sessions)
 
-- Supabase-backed history for cross-device sync (currently localStorage only —
-  per-browser, doesn't follow you to another device). Needs a Supabase project
-  and a decision on auth strategy (anonymous per-device vs. real login) before
-  it can be built.
-- Auth, if this stops being just-for-us
+- Real login (replace anonymous sessions), if this stops being just-for-us
+  and answers need to follow a specific person rather than a specific browser
 
 ## Session log
 
@@ -82,3 +106,12 @@ DeepSeek, GLM, Kimi, and more).
   resends, effectively rewinding the conversation from that point.
   `hooks/useChat.ts` refactored so `updateMessage`/`streamOne` are shared
   between `sendMessage` and the new `regenerateMessage`/`editMessage`.
+- **Session 5** — optional Supabase sync (`lib/supabaseClient.ts`,
+  `lib/cloudSync.ts`, `supabase/migrations/0001_conversations.sql`). Chose
+  anonymous per-device sessions over building a login screen — it's a real
+  Supabase Auth session (not a fake client-side id), just without a
+  password, so it's a straightforward upgrade path to real login later
+  rather than a rewrite. Conversations sync as a single JSONB blob per row,
+  debounced ~1s after changes settle so a streaming response doesn't fire a
+  write per token. Entirely inert unless `NEXT_PUBLIC_SUPABASE_URL` and
+  `NEXT_PUBLIC_SUPABASE_ANON_KEY` are set.
