@@ -54,7 +54,8 @@ DeepSeek, GLM, Kimi, and more).
 
 ## Roadmap (later sessions)
 
-- Persist conversation history (localStorage, then Supabase for cross-device sync)
+- Supabase-backed history for cross-device sync (currently localStorage only —
+  per-browser, doesn't follow you to another device)
 - Model-compare mode — ask two models the same question side by side
 - Message actions: copy, regenerate, edit
 - Auth, if this stops being just-for-us
@@ -63,3 +64,9 @@ DeepSeek, GLM, Kimi, and more).
 
 - **Session 1** — infrastructure and backbone: chat UI, streaming API proxy,
   dynamic model list, in-memory conversation switching, light/dark theme.
+- **Session 2** — persistent conversation history via `localStorage`
+  (`lib/storage.ts`); conversations and the active chat now survive a
+  refresh. Added delete-conversation (hover a chat in the sidebar) since
+  persistence means old chats stick around until removed. A message left
+  mid-stream when the tab closes is finalized on reload rather than showing
+  a stuck typing indicator.

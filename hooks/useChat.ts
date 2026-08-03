@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatMessage, Conversation, ModelOption } from "@/lib/types";
+import { loadActiveId, loadConversations, saveActiveId, saveConversations } from "@/lib/storage";
 
 const FALLBACK_MODEL = "claude-sonnet-5";
 
@@ -22,13 +23,24 @@ function makeConversation(model: string): Conversation {
 export function useChat() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [modelsError, setModelsError] = useState<string | null>(null);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<Conversation[]>(
+    () => loadConversations() ?? []
+  );
+  const [activeId, setActiveId] = useState<string | null>(() => {
+    const restored = loadConversations();
+    if (!restored || restored.length === 0) return null;
+    const storedActive = loadActiveId();
+    return storedActive && restored.some((c) => c.id === storedActive)
+      ? storedActive
+      : restored[0].id;
+  });
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const initialized = useRef(false);
+  const hasRestored = useRef(conversations.length > 0);
 
-  // Load the live model list once, then seed the first conversation.
+  // Load the live model list once. If nothing was restored from storage,
+  // seed a first conversation once we know which models are available.
   useEffect(() => {
     if (initialized.current) return;
     initialized.current = true;
@@ -42,18 +54,31 @@ export function useChat() {
         const list = data.models && data.models.length > 0 ? data.models : [];
         setModels(list);
 
-        const defaultModel = list[0]?.id || FALLBACK_MODEL;
-        const first = makeConversation(defaultModel);
-        setConversations([first]);
-        setActiveId(first.id);
+        if (!hasRestored.current) {
+          const defaultModel = list[0]?.id || FALLBACK_MODEL;
+          const first = makeConversation(defaultModel);
+          setConversations([first]);
+          setActiveId(first.id);
+        }
       })
       .catch((err) => {
         setModelsError(err instanceof Error ? err.message : "Failed to load models");
-        const first = makeConversation(FALLBACK_MODEL);
-        setConversations([first]);
-        setActiveId(first.id);
+        if (!hasRestored.current) {
+          const first = makeConversation(FALLBACK_MODEL);
+          setConversations([first]);
+          setActiveId(first.id);
+        }
       });
   }, []);
+
+  // Persist to localStorage whenever conversations or the active chat change.
+  useEffect(() => {
+    saveConversations(conversations);
+  }, [conversations]);
+
+  useEffect(() => {
+    saveActiveId(activeId);
+  }, [activeId]);
 
   const activeConversation = conversations.find((c) => c.id === activeId) || null;
 
@@ -67,6 +92,19 @@ export function useChat() {
   const selectConversation = useCallback((id: string) => {
     setActiveId(id);
   }, []);
+
+  const deleteConversation = useCallback(
+    (id: string) => {
+      setConversations((prev) => {
+        const next = prev.filter((c) => c.id !== id);
+        if (id === activeId) {
+          setActiveId(next[0]?.id ?? null);
+        }
+        return next;
+      });
+    },
+    [activeId]
+  );
 
   const setActiveModel = useCallback(
     (model: string) => {
@@ -191,6 +229,7 @@ export function useChat() {
     activeConversation,
     newConversation,
     selectConversation,
+    deleteConversation,
     setActiveModel,
     sendMessage,
     sending,
