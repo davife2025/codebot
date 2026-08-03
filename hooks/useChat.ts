@@ -15,6 +15,7 @@ function makeConversation(model: string): Conversation {
     id: makeId(),
     title: "New chat",
     model,
+    compareModel: null,
     messages: [],
     createdAt: Date.now(),
   };
@@ -116,110 +117,136 @@ export function useChat() {
     [activeId]
   );
 
+  const setCompareModel = useCallback(
+    (model: string | null) => {
+      if (!activeId) return;
+      setConversations((prev) =>
+        prev.map((c) => (c.id === activeId ? { ...c, compareModel: model } : c))
+      );
+    },
+    [activeId]
+  );
+
   const sendMessage = useCallback(
     async (content: string) => {
       if (!activeId || !content.trim() || sending) return;
       setSendError(null);
 
       const conversationId = activeId;
+      const conversation = conversations.find((c) => c.id === conversationId);
+      if (!conversation) return;
+
+      const turnId = makeId();
       const userMessage: ChatMessage = { id: makeId(), role: "user", content };
-      const assistantId = makeId();
-      const modelForRequest =
-        conversations.find((c) => c.id === conversationId)?.model ||
-        models[0]?.id ||
-        FALLBACK_MODEL;
+      const assistantAId = makeId();
+      const modelA = conversation.model;
+      const modelB = conversation.compareModel || null;
+      const assistantBId = modelB ? makeId() : null;
 
       let historyForRequest: ChatMessage[] = [];
 
       setConversations((prev) =>
         prev.map((c) => {
           if (c.id !== conversationId) return c;
-          const nextMessages = [
-            ...c.messages,
-            userMessage,
-            { id: assistantId, role: "assistant" as const, content: "", model: c.model, pending: true },
+          const newAssistants: ChatMessage[] = [
+            { id: assistantAId, role: "assistant", content: "", model: modelA, pending: true, turnId },
           ];
+          if (modelB && assistantBId) {
+            newAssistants.push({
+              id: assistantBId,
+              role: "assistant",
+              content: "",
+              model: modelB,
+              pending: true,
+              turnId,
+            });
+          }
           historyForRequest = [...c.messages, userMessage];
           return {
             ...c,
             title: c.title === "New chat" ? content.slice(0, 48) : c.title,
-            messages: nextMessages,
+            messages: [...c.messages, userMessage, ...newAssistants],
           };
         })
       );
 
       setSending(true);
 
-      const updateAssistant = (updater: (msg: ChatMessage) => ChatMessage) => {
+      const updateMessage = (id: string, updater: (msg: ChatMessage) => ChatMessage) => {
         setConversations((prev) =>
           prev.map((c) =>
             c.id !== conversationId
               ? c
-              : {
-                  ...c,
-                  messages: c.messages.map((m) =>
-                    m.id === assistantId ? updater(m) : m
-                  ),
-                }
+              : { ...c, messages: c.messages.map((m) => (m.id === id ? updater(m) : m)) }
           )
         );
       };
 
-      try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: modelForRequest,
-            messages: historyForRequest.map((m) => ({ role: m.role, content: m.content })),
-          }),
-        });
+      const streamOne = async (model: string, assistantId: string) => {
+        try {
+          const res = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model,
+              messages: historyForRequest.map((m) => ({ role: m.role, content: m.content })),
+            }),
+          });
 
-        if (!res.ok || !res.body) {
-          const data = await res.json().catch(() => ({ error: "Request failed" }));
-          throw new Error(data.error || `Request failed with status ${res.status}`);
-        }
+          if (!res.ok || !res.body) {
+            const data = await res.json().catch(() => ({ error: "Request failed" }));
+            throw new Error(data.error || `Request failed with status ${res.status}`);
+          }
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
 
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
 
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const payload = trimmed.slice(5).trim();
-            if (payload === "[DONE]") continue;
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith("data:")) continue;
+              const payload = trimmed.slice(5).trim();
+              if (payload === "[DONE]") continue;
 
-            try {
-              const parsed = JSON.parse(payload);
-              const delta: string | undefined = parsed?.choices?.[0]?.delta?.content;
-              if (delta) {
-                updateAssistant((m) => ({ ...m, content: m.content + delta }));
+              try {
+                const parsed = JSON.parse(payload);
+                const delta: string | undefined = parsed?.choices?.[0]?.delta?.content;
+                if (delta) {
+                  updateMessage(assistantId, (m) => ({ ...m, content: m.content + delta }));
+                }
+              } catch {
+                // Ignore malformed SSE fragments; streaming continues.
               }
-            } catch {
-              // Ignore malformed SSE fragments; streaming continues.
             }
           }
-        }
 
-        updateAssistant((m) => ({ ...m, pending: false }));
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Something went wrong";
-        setSendError(message);
-        updateAssistant((m) => ({ ...m, pending: false, content: m.content || `Error: ${message}` }));
-      } finally {
-        setSending(false);
-      }
+          updateMessage(assistantId, (m) => ({ ...m, pending: false }));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Something went wrong";
+          setSendError(message);
+          updateMessage(assistantId, (m) => ({
+            ...m,
+            pending: false,
+            content: m.content || `Error: ${message}`,
+          }));
+        }
+      };
+
+      const tasks = [streamOne(modelA, assistantAId)];
+      if (modelB && assistantBId) tasks.push(streamOne(modelB, assistantBId));
+
+      await Promise.all(tasks);
+      setSending(false);
     },
-    [activeId, conversations, models, sending]
+    [activeId, conversations, sending]
   );
 
   return {
@@ -231,6 +258,7 @@ export function useChat() {
     selectConversation,
     deleteConversation,
     setActiveModel,
+    setCompareModel,
     sendMessage,
     sending,
     sendError,

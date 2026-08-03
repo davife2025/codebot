@@ -55,8 +55,9 @@ DeepSeek, GLM, Kimi, and more).
 ## Roadmap (later sessions)
 
 - Supabase-backed history for cross-device sync (currently localStorage only —
-  per-browser, doesn't follow you to another device)
-- Model-compare mode — ask two models the same question side by side
+  per-browser, doesn't follow you to another device). Needs a Supabase project
+  and a decision on auth strategy (anonymous per-device vs. real login) before
+  it can be built.
 - Message actions: copy, regenerate, edit
 - Auth, if this stops being just-for-us
 
@@ -70,3 +71,8 @@ DeepSeek, GLM, Kimi, and more).
   persistence means old chats stick around until removed. A message left
   mid-stream when the tab closes is finalized on reload rather than showing
   a stuck typing indicator.
+- **Session 3** — model-compare mode. Click "+ Compare" in the header to pick
+  a second model; sending a message fires both models in parallel and shows
+  their answers side by side, each tagged with its model. `ChatMessage` now
+  carries a `turnId` so `MessageList` can group same-turn answers together.
+  Toggle off with the ✕ next to the second dropdown.
