@@ -15,9 +15,10 @@ export async function POST(request: Request) {
   try {
     config = getAgentRouterConfig();
   } catch (err) {
+    // Missing/invalid config, not a server fault — 401, not 500.
     return Response.json(
       { error: err instanceof Error ? err.message : "Missing configuration" },
-      { status: 500 }
+      { status: 401 }
     );
   }
 

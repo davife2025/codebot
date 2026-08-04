@@ -5,17 +5,19 @@ import type { KeyboardEvent } from "react";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
+  onStop?: () => void;
+  sending?: boolean;
   disabled?: boolean;
   placeholder?: string;
 }
 
-export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, sending, disabled, placeholder }: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const submit = () => {
     const trimmed = value.trim();
-    if (!trimmed || disabled) return;
+    if (!trimmed || disabled || sending) return;
     onSend(trimmed);
     setValue("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -49,16 +51,28 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
           disabled={disabled}
           className="max-h-48 flex-1 resize-none border-none bg-transparent px-2 py-1.5 text-sm shadow-none focus:shadow-none"
         />
-        <button
-          onClick={submit}
-          disabled={disabled || !value.trim()}
-          aria-label="Send message"
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--text-primary)] text-[var(--surface-0)] disabled:opacity-30"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M5 12h14M13 6l6 6-6 6" />
-          </svg>
-        </button>
+        {sending ? (
+          <button
+            onClick={onStop}
+            aria-label="Stop generating"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--text-primary)] text-[var(--surface-0)]"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="4" y="4" width="16" height="16" rx="2" />
+            </svg>
+          </button>
+        ) : (
+          <button
+            onClick={submit}
+            disabled={disabled || !value.trim()}
+            aria-label="Send message"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--text-primary)] text-[var(--surface-0)] disabled:opacity-30"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M5 12h14M13 6l6 6-6 6" />
+            </svg>
+          </button>
+        )}
       </div>
     </div>
   );

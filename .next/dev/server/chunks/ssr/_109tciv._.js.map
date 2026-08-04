@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 4, "column": 0}, "map": {"version":3,"sources":["file:///Users/macbookpro/Desktop/codebot/app/layout.tsx"],"sourcesContent":["import type { Metadata } from \"next\";\nimport \"./globals.css\";\n\nexport const metadata: Metadata = {\n  title: \"Agent Chat\",\n  description: \"Chat with any model through AgentRouter\",\n};\n\nexport default function RootLayout({\n  children,\n}: Readonly<{\n  children: React.ReactNode;\n}>) {\n  return (\n    <html lang=\"en\" className=\"h-full\" suppressHydrationWarning>\n      <body className=\"h-full antialiased\">{children}</body>\n    </html>\n  );\n}\n"],"names":["metadata","title","description","RootLayout","children","lang","className","suppressHydrationWarning"],"mappings":";;;;;;;;;AAGO,MAAMA,WAAqB;IAChCC,OAAO;IACPC,aAAa;AACf;AAEe,SAASC,WAAW,EACjCC,QAAQ,EAGR;IACA,qBACE,8OAAC;QAAKC,MAAK;QAAKC,WAAU;QAASC,wBAAwB;kBACzD,cAAA,8OAAC;YAAKD,WAAU;sBAAsBF;;;;;;;;;;;AAG5C"}},
+    {"offset": {"line": 44, "column": 0}, "map": {"version":3,"sources":["file:///Users/macbookpro/Desktop/codebot/node_modules/next/src/server/route-modules/app-page/vendored/rsc/react-jsx-dev-runtime.ts"],"sourcesContent":["module.exports = (\n  require('../../module.compiled') as typeof import('../../module.compiled')\n).vendored['react-rsc']!.ReactJsxDevRuntime\n"],"names":["module","exports","require","vendored","ReactJsxDevRuntime"],"mappings":"AAAAA,OAAOC,OAAO,GACZC,QAAQ,4HACRC,QAAQ,CAAC,YAAY,CAAEC,kBAAkB","ignoreList":[0]}}]
+}

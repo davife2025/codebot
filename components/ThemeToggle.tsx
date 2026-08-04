@@ -2,26 +2,42 @@
 
 import { useEffect, useState } from "react";
 
-function getInitialTheme(): "light" | "dark" {
-  if (typeof window === "undefined") return "light";
-  const stored = window.localStorage.getItem("theme");
-  if (stored === "light" || stored === "dark") return stored;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
+type Theme = "light" | "dark";
 
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
+  // Deliberately null on first render — not computed from window/localStorage
+  // — so server and client render identically and hydration never mismatches.
+  // The real value is only read after mount, in the effect below.
+  const [theme, setTheme] = useState<Theme | null>(null);
 
-  // Sync the external DOM attribute whenever React state changes.
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-  }, [theme]);
+    const stored = window.localStorage.getItem("theme");
+    const resolved: Theme =
+      stored === "light" || stored === "dark"
+        ? stored
+        : window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+    document.documentElement.setAttribute("data-theme", resolved);
+    // Reading localStorage/matchMedia and syncing the result into React state
+    // can only happen post-mount (no window on the server) — this is exactly
+    // the "sync with an external system" case the rule expects an effect for.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTheme(resolved);
+  }, []);
 
   const toggle = () => {
-    const next = theme === "dark" ? "light" : "dark";
-    setTheme(next);
+    const next: Theme = theme === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
     window.localStorage.setItem("theme", next);
+    setTheme(next);
   };
+
+  if (theme === null) {
+    // Same footprint as the real button, but no theme-dependent content —
+    // this is what avoids both the mismatch and an icon "flash" on load.
+    return <div className="h-8 w-8" aria-hidden="true" />;
+  }
 
   return (
     <button

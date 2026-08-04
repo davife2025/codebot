@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatMessage, Conversation, ModelOption } from "@/lib/types";
+import { buildApiHistory } from "@/lib/messages";
 import { loadActiveId, loadConversations, saveActiveId, saveConversations } from "@/lib/storage";
 import {
   deleteRemoteConversation,
@@ -11,7 +12,14 @@ import {
 } from "@/lib/cloudSync";
 import { isCloudSyncEnabled } from "@/lib/supabaseClient";
 
-const FALLBACK_MODEL = "claude-sonnet-5";
+// AgentRouter model IDs are dated/versioned (e.g. "claude-sonnet-4-5-20250929"),
+// never confirmed against a live catalog from this environment. Only used if
+// /api/models fails outright. Override with NEXT_PUBLIC_DEFAULT_MODEL once
+// you know the exact id your AgentRouter account exposes.
+const FALLBACK_MODEL = process.env.NEXT_PUBLIC_DEFAULT_MODEL || "claude-sonnet-4-5-20250929";
+
+// A hung request shouldn't lock the UI forever.
+const REQUEST_TIMEOUT_MS = 120_000;
 
 function makeId() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -42,12 +50,36 @@ export function useChat() {
       ? storedActive
       : restored[0].id;
   });
-  const [sending, setSending] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
+  // Per-conversation, not global — sending in one chat must not block
+  // sending in another.
+  const [sendingIds, setSendingIds] = useState<Set<string>>(new Set());
+  const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
   const [userId, setUserId] = useState<string | null>(null);
   const [cloudError, setCloudError] = useState<string | null>(null);
   const initialized = useRef(false);
   const syncTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // assistantId -> its in-flight request's controller
+  const controllers = useRef<Record<string, AbortController>>({});
+  // conversationId -> assistantIds currently streaming into it (for stop)
+  const activeStreams = useRef<Record<string, string[]>>({});
+
+  const markSending = useCallback((conversationId: string, isSending: boolean) => {
+    setSendingIds((prev) => {
+      const next = new Set(prev);
+      if (isSending) next.add(conversationId);
+      else next.delete(conversationId);
+      return next;
+    });
+  }, []);
+
+  const setConversationError = useCallback((conversationId: string, message: string | null) => {
+    setSendErrors((prev) => {
+      const next = { ...prev };
+      if (message) next[conversationId] = message;
+      else delete next[conversationId];
+      return next;
+    });
+  }, []);
 
   // Load the live model list once, then — if cloud sync is configured — sign
   // in anonymously and merge remote conversations with whatever was restored
@@ -144,11 +176,13 @@ export function useChat() {
     });
   }, [conversations, userId]);
 
-  // Clear any pending debounced syncs on unmount.
+  // Clear any pending debounced syncs and in-flight requests on unmount.
   useEffect(() => {
     const timers = syncTimers.current;
+    const liveControllers = controllers.current;
     return () => {
       Object.values(timers).forEach(clearTimeout);
+      Object.values(liveControllers).forEach((c) => c.abort("unmount"));
     };
   }, []);
 
@@ -167,6 +201,9 @@ export function useChat() {
 
   const deleteConversation = useCallback(
     (id: string) => {
+      (activeStreams.current[id] || []).forEach((assistantId) => {
+        controllers.current[assistantId]?.abort("deleted");
+      });
       setConversations((prev) => {
         const next = prev.filter((c) => c.id !== id);
         if (id === activeId) {
@@ -219,14 +256,20 @@ export function useChat() {
       history: ChatMessage[],
       assistantId: string
     ) => {
+      const controller = new AbortController();
+      controllers.current[assistantId] = controller;
+      activeStreams.current[conversationId] = [
+        ...(activeStreams.current[conversationId] || []),
+        assistantId,
+      ];
+      const timeoutId = setTimeout(() => controller.abort("timeout"), REQUEST_TIMEOUT_MS);
+
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model,
-            messages: history.map((m) => ({ role: m.role, content: m.content })),
-          }),
+          body: JSON.stringify({ model, messages: buildApiHistory(history) }),
+          signal: controller.signal,
         });
 
         if (!res.ok || !res.body) {
@@ -252,41 +295,75 @@ export function useChat() {
             const payload = trimmed.slice(5).trim();
             if (payload === "[DONE]") continue;
 
+            let parsed: unknown;
             try {
-              const parsed = JSON.parse(payload);
-              const delta: string | undefined = parsed?.choices?.[0]?.delta?.content;
-              if (delta) {
-                updateMessage(conversationId, assistantId, (m) => ({
-                  ...m,
-                  content: m.content + delta,
-                }));
-              }
+              parsed = JSON.parse(payload);
             } catch {
-              // Ignore malformed SSE fragments; streaming continues.
+              continue; // malformed fragment — skip, don't abort the stream
+            }
+
+            const obj = parsed as {
+              error?: string | { message?: string };
+              choices?: Array<{ delta?: { content?: string } }>;
+            };
+
+            // Unlike a malformed fragment, an explicit error from the
+            // provider must not be swallowed — surface it as a real failure.
+            if (obj?.error) {
+              const msg = typeof obj.error === "string" ? obj.error : obj.error?.message;
+              throw new Error(msg || "The model returned an error mid-response.");
+            }
+
+            const delta = obj?.choices?.[0]?.delta?.content;
+            if (delta) {
+              updateMessage(conversationId, assistantId, (m) => ({
+                ...m,
+                content: m.content + delta,
+              }));
             }
           }
         }
 
         updateMessage(conversationId, assistantId, (m) => ({ ...m, pending: false }));
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Something went wrong";
-        setSendError(message);
-        updateMessage(conversationId, assistantId, (m) => ({
-          ...m,
-          pending: false,
-          content: m.content || `Error: ${message}`,
-        }));
+        if (err instanceof DOMException && err.name === "AbortError") {
+          const reason = controller.signal.reason;
+          const message =
+            reason === "timeout"
+              ? `Timed out after ${REQUEST_TIMEOUT_MS / 1000}s.`
+              : "Stopped.";
+          updateMessage(conversationId, assistantId, (m) => ({
+            ...m,
+            pending: false,
+            content: m.content || message,
+          }));
+          if (reason === "timeout") setConversationError(conversationId, message);
+        } else {
+          const message = err instanceof Error ? err.message : "Something went wrong";
+          setConversationError(conversationId, message);
+          updateMessage(conversationId, assistantId, (m) => ({
+            ...m,
+            pending: false,
+            content: m.content || `Error: ${message}`,
+          }));
+        }
+      } finally {
+        clearTimeout(timeoutId);
+        delete controllers.current[assistantId];
+        activeStreams.current[conversationId] = (
+          activeStreams.current[conversationId] || []
+        ).filter((id) => id !== assistantId);
       }
     },
-    [updateMessage]
+    [updateMessage, setConversationError]
   );
 
   const sendMessage = useCallback(
     async (content: string) => {
-      if (!activeId || !content.trim() || sending) return;
-      setSendError(null);
-
+      if (!activeId || !content.trim() || sendingIds.has(activeId)) return;
       const conversationId = activeId;
+      setConversationError(conversationId, null);
+
       const conversation = conversations.find((c) => c.id === conversationId);
       if (!conversation) return;
 
@@ -324,7 +401,7 @@ export function useChat() {
         })
       );
 
-      setSending(true);
+      markSending(conversationId, true);
 
       const tasks = [streamOne(conversationId, modelA, historyForRequest, assistantAId)];
       if (modelB && assistantBId) {
@@ -332,14 +409,14 @@ export function useChat() {
       }
 
       await Promise.all(tasks);
-      setSending(false);
+      markSending(conversationId, false);
     },
-    [activeId, conversations, sending, streamOne]
+    [activeId, conversations, sendingIds, streamOne, markSending, setConversationError]
   );
 
   const regenerateMessage = useCallback(
     async (assistantId: string) => {
-      if (!activeId || sending) return;
+      if (!activeId || sendingIds.has(activeId)) return;
       const conversation = conversations.find((c) => c.id === activeId);
       if (!conversation) return;
 
@@ -354,18 +431,18 @@ export function useChat() {
       const history = conversation.messages.slice(0, userIdx + 1);
       const model = conversation.messages[idx].model || conversation.model;
 
-      setSendError(null);
+      setConversationError(conversationId, null);
       updateMessage(conversationId, assistantId, (m) => ({ ...m, content: "", pending: true }));
-      setSending(true);
+      markSending(conversationId, true);
       await streamOne(conversationId, model, history, assistantId);
-      setSending(false);
+      markSending(conversationId, false);
     },
-    [activeId, conversations, sending, streamOne, updateMessage]
+    [activeId, conversations, sendingIds, streamOne, updateMessage, markSending, setConversationError]
   );
 
   const editMessage = useCallback(
     (userMessageId: string, newContent: string) => {
-      if (!activeId || sending || !newContent.trim()) return;
+      if (!activeId || sendingIds.has(activeId) || !newContent.trim()) return;
       const conversationId = activeId;
 
       setConversations((prev) =>
@@ -379,8 +456,14 @@ export function useChat() {
 
       sendMessage(newContent);
     },
-    [activeId, sending, sendMessage]
+    [activeId, sendingIds, sendMessage]
   );
+
+  const stopGeneration = useCallback((conversationId: string) => {
+    (activeStreams.current[conversationId] || []).forEach((assistantId) => {
+      controllers.current[assistantId]?.abort("user");
+    });
+  }, []);
 
   return {
     models,
@@ -395,8 +478,11 @@ export function useChat() {
     sendMessage,
     regenerateMessage,
     editMessage,
-    sending,
-    sendError,
+    stopGeneration,
+    // Scoped to the active conversation for the UI's convenience — other
+    // conversations can keep streaming independently in the background.
+    sending: activeId ? sendingIds.has(activeId) : false,
+    sendError: activeId ? sendErrors[activeId] ?? null : null,
     cloudSynced: Boolean(userId),
     cloudError,
   };
